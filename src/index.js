@@ -4,6 +4,7 @@ const express = require('express');
 const socketio = require('socket.io');
 const Filter = require('bad-words');
 const { generateMessage, generateLocationMessage } = require('./utils/messages');
+const { addUser, removeUser, getUser, getUsersInRoom } = require('./utils/users');
 
 const app = express();
 const server = http.createServer(app);
@@ -40,15 +41,29 @@ io.on('connection', (socket) => {
 
 
 
-    socket.on('join', ({ username, room }) => {
+    socket.on('join', (options, callback) => {
+        const { error, user } = addUser({ id: socket.id, ...options });
+
+        if (error) {
+            return callback(error);
+        }
+
         // allow us to join a given chat room, and we pass to it the name of the room we are trying to join
-        socket.join(room);
+        socket.join(user.room);
 
         // challenge
-        socket.emit('displayMessage', generateMessage('Welcome!'));
+        socket.emit('displayMessage', generateMessage('Admin', 'Welcome!'));
 
         // only send message to another users, not current user
-        socket.broadcast.to(room).emit('displayMessage', generateMessage(`${username} has joined!`));
+        socket.broadcast.to(user.room).emit('displayMessage', generateMessage('Admin', `${user.username} has joined!`));
+
+        io.to(user.room).emit('roomData', {
+            room: user.room,
+            users: getUsersInRoom(user.room)
+        })
+
+        // let client know they were able to join   
+        callback();
 
         // socket.emit: send to current connection
         // io.emit: send to all connections
@@ -59,25 +74,42 @@ io.on('connection', (socket) => {
 
     socket.on('chatMessage', (message, callback) => {
 
+        const user = getUser(socket.id);
+        if (!user) {
+            return callback('Can\'t find current user');
+        }
         const filter = new Filter();
 
         if (filter.isProfane(message)) {
             return callback('Profanity is not allowed!')
         }
 
-        io.emit('displayMessage', generateMessage(message));
+        io.to(user.room).emit('displayMessage', generateMessage(user.username, message));
         callback();
     });
     // ** server (emit) => client (receive) => countUpdated
     // ** client (emit) => server (receive) => increment
 
     socket.on('sendLocation', (location, callback) => {
-        io.emit('locationSharing', generateLocationMessage(`https://google.com/maps?q=${location.longitude},${location.latitude}`));
-        callback('Location shared!');
+        const user = getUser(socket.id);
+        if (!user) {
+            return callback({ error: 'something wrong, can\'t get a current user' })
+        }
+        io.to(user.room).emit('locationSharing', generateLocationMessage(user.username, `https://google.com/maps?q=${location.longitude},${location.latitude}`));
+        callback({ message: 'Location shared!' });
     });
 
     socket.on('disconnect', () => {
-        io.emit('displayMessage', generateMessage('A user has left!'));
+        const user = removeUser(socket.id);
+
+        if (user) {
+            io.to(user.room).emit('displayMessage', generateMessage('Admin', `${user.username} has left!`));
+            io.to(user.room).emit('roomData', {
+                room: user.room,
+                users: getUsersInRoom(user.room)
+            })
+        }
+
     });
 })
 
